@@ -1,0 +1,8 @@
+slack-bolt==1.27.0
+slack-cli-hooks<1.0.0
+python-dotenv>=1.0.0
+gspread>=6.0.0
+google-auth>=2.0.0
+pytest==9.0.2
+flake8==7.3.0
+black==25.12.0
