@@ -39,3 +39,4 @@ logs/
 .idea/
 service_account.json
 manifest.json service_account.json
+service_account.json
