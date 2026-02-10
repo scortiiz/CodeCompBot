@@ -37,3 +37,5 @@ logs/
 *.db
 .pytype/
 .idea/
+service_account.json
+manifest.json service_account.json
