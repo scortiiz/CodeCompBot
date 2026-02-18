@@ -72,7 +72,7 @@ Type these messages in the challenge or review channel (as noted):
 | Message | Where | Description |
 |---------|-------|-------------|
 | `standings` or `leaderboard` | Challenge or Review | List all teams and their points |
-| `challenges left` | Challenge or Review | Show challenges remaining for your team (excludes negative pts) |
+| `challenges left` | Challenge or Review | Show challenges remaining for your team |
 | `challenges left [team name]` | Challenge or Review | Show challenges remaining for a specific team |
 | `challenges left 3` or `challenges left [team] 3` | Challenge or Review | Show only 3-pt challenges left for your team (or specified team) |
 | `challenge randomize` or `challenge randomize available` | Challenge or Review | Pick a random challenge no team has completed |
