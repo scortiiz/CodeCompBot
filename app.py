@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import random
 
 from slack_bolt import App
+from slack_bolt.adapter.wsgi import SlackRequestHandler
 
 from listeners import register_listeners
 from helpers import (
@@ -535,7 +536,14 @@ def handle_message_events(event, client, logger):
 # Register Listeners
 register_listeners(app)
 
+# WSGI entrypoint (works with gunicorn and simple_server)
+api = SlackRequestHandler(app)
+
 
 if __name__ == "__main__":
+    from wsgiref.simple_server import make_server
+
     port = int(os.environ.get("PORT", "3000"))
-    app.start(host="0.0.0.0", port=port)
+    httpd = make_server("0.0.0.0", port, api)
+    logging.getLogger(__name__).info("Listening on 0.0.0.0:%s", port)
+    httpd.serve_forever()
