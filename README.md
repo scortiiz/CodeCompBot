@@ -16,12 +16,12 @@ Before getting started, make sure you have a development workspace where you hav
 Before you can run the app, you'll need to store some environment variables.
 
 1. Open your apps configuration page from this list, click **OAuth & Permissions** in the left hand menu, then copy the Bot User OAuth Token. You will store this in your environment as `SLACK_BOT_TOKEN`.
-2. Click ***Basic Information** from the left hand menu and follow the steps in the App-Level Tokens section to create an app-level token with the `connections:write` scope. Copy this token. You will store this in your environment as `SLACK_APP_TOKEN`.
+2. Click **Basic Information** and copy the **Signing Secret** (required for HTTPS mode).
 
 ```zsh
-# Replace with your app token and bot token
+# Bot token and signing secret (required)
 export SLACK_BOT_TOKEN=<your-bot-token>
-export SLACK_APP_TOKEN=<your-app-token>
+export SLACK_SIGNING_SECRET=<your-signing-secret>
 
 # Challenge app specific
 export CHALLENGE_CHANNEL_ID=<challenges-channel-id>
@@ -50,6 +50,24 @@ pip install -r requirements.txt
 python3 app.py
 ```
 
+### HTTPS mode (production / deployed)
+
+This app uses HTTPS (not Socket Mode). Configure your Slack app:
+
+1. **Event Subscriptions** – Toggle *Enable Events* on. Set **Request URL** to your public HTTPS endpoint (e.g. `https://your-domain.com/slack/events`). Slack will verify it.
+2. **Interactivity & Shortcuts** – Set **Request URL** to the same endpoint (Bolt handles all paths).
+3. **Socket Mode** – Must be *disabled* in app settings (or in manifest `socket_mode_enabled: false`).
+
+For production, run with gunicorn:
+
+```zsh
+gunicorn -b 0.0.0.0:$PORT app:app
+```
+
+Set `PORT` (default 3000). Bolt mounts at `/slack/events` by default.
+
+For local development, use [ngrok](https://ngrok.com) to expose your port, then use the ngrok HTTPS URL as the Request URL in Slack.
+
 #### Linting
 ```zsh
 # Run flake8 from root directory for linting
@@ -67,18 +85,41 @@ pytest .
 
 ## Message Commands
 
-Type these messages in the challenge or review channel (as noted):
+Type these messages in the challenge or review channel (as noted). All commands are case-insensitive.
+
+### Public commands (Challenge or Review channel)
+
+| Message | Description |
+|---------|-------------|
+| `standings` / `standing` / `leaderboard` / `leader` / `leaderbord` | List all teams and their points |
+| `challenges left` / `challenge left` | Show challenges remaining for your team (excludes negative pts) |
+| `challenges left [team name]` | Show challenges remaining for a specific team |
+| `challenges left [pts]` or `challenges left [team] [pts]` | Filter by point value (e.g. `challenges left 3` for 3‑pt challenges) |
+| `challenge randomize` / `challenge randomise` | Pick a random challenge no team has completed |
+| `challenge randomize available` / `challenge randomize unclaimed` | Same as above |
+| `challenge randomize team` / `challenge randomize my team` | Pick a random challenge your team hasn't completed |
+
+### Challenge channel only (submissions)
+
+| Message | Description |
+|---------|-------------|
+| `challenge [description]` | Submit a challenge (requires photo or video attachment) |
+
+### Admin only
 
 | Message | Where | Description |
 |---------|-------|-------------|
-| `standings` or `leaderboard` | Challenge or Review | List all teams and their points |
-| `challenges left` | Challenge or Review | Show challenges remaining for your team (excludes negative pts) |
-| `challenges left [team name]` | Challenge or Review | Show challenges remaining for a specific team |
-| `challenges left 3` or `challenges left [team] 3` | Challenge or Review | Show only 3-pt challenges left for your team (or specified team) |
-| `challenge randomize` or `challenge randomize available` | Challenge or Review | Pick a random challenge no team has completed |
-| `challenge randomize team` | Challenge or Review | Pick a random challenge your team hasn't completed |
-| `reset semester` | Review only (admin) | Clear ledger and reset points for new semester |
-| `admin submit [team] [description]` | Any channel (admin) | Submit on behalf of a team; assign challenge in Review modal (attach photo) |
+| `admin submit [team] [description]` | Any channel | Submit on behalf of a team; assign challenge in Review modal (attach photo) |
+| `reset semester` | Review channel | Clear ledger, submissions, and queue for new semester |
+| `resend queue` / `resend review queue` | Review channel | Refresh the review queue message |
+| `surprise [points] [challenge name] \| [optional prize]` | Review channel | Create a surprise challenge (e.g. `surprise 5 3+ show up to CodeSoccer \| free boba`) |
+
+### Other actions
+
+| Action | Description |
+|--------|-------------|
+| **Review** button (on queue message) | Open the review modal to approve/reject the next pending submission |
+| **Add to review queue** (message shortcut) | Right‑click a message → shortcut → add to review queue for unmarked submissions (admin only) |
 
 **Note:** Sheet headers must match: `slack_user_id`, `name`, `team` (Members); `challenge_key`, `challenge_name`, `points`, `min_num` (Challenges); `submission_id`, `created_at`, `slack_user_id`, `team`, `member_text`, `message_url`, `photo_url`, `status`, `challenge_key`, `points`, `reviewed_by` (Submissions); `timestamp`, `team`, `points_delta`, `challenge_key`, `submission_id`, `reviewed_by` (Ledger); `message_ts`, `channel_id` (Queue – one row for the single review queue message).
 

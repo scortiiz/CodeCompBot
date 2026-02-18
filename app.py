@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 import random
 
 from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from listeners import register_listeners
 from helpers import (
@@ -571,4 +570,5 @@ def _startup_refresh_queue():
 
 if __name__ == "__main__":
     _startup_refresh_queue()
-    app.start(port=3000)
+    port = int(os.environ.get("PORT", "3000"))
+    app.start(host="0.0.0.0", port=port)
