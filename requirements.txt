@@ -1,4 +1,5 @@
 slack-bolt==1.27.0
+flask
 gunicorn
 slack-cli-hooks<1.0.0
 python-dotenv>=1.0.0
