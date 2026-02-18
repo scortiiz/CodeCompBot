@@ -263,7 +263,7 @@ def handle_message_events(event, client, logger):
         if team is None:
             client.chat_postMessage(
                 channel=channel_id,
-                text=f"Team *{team_input}* not found. Valid teams: {', '.join(teams)}",
+                text=f"Team *{team_input}* not found. These are the actual teams: {', '.join(teams)}",
                 thread_ts=thread_ts or message_ts,
             )
             return
@@ -335,7 +335,7 @@ def handle_message_events(event, client, logger):
             if not team:
                 client.chat_postMessage(
                     channel=channel_id,
-                    text="Awk... You're not on a team. Use `challenge randomize` or `challenge randomize available` for unclaimed challenges.",
+                    text="Awk... You're not on a team. Try `challenge randomize` or `challenge randomize available` for unclaimed challenges.",
                     thread_ts=thread_ts or message_ts,
                 )
                 return
