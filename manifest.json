@@ -22,6 +22,12 @@
               "type": "global",
               "callback_id": "sample_shortcut_id",
               "description": "Runs a sample shortcut"
+          },
+          {
+              "name": "Add to review queue",
+              "type": "message",
+              "callback_id": "add_to_review_queue_shortcut",
+              "description": "Add this message to the review queue (for unmarked submissions)"
           }
       ],
       "slash_commands": [

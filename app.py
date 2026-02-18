@@ -1,7 +1,7 @@
 import os
 import re
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import random
 
@@ -28,6 +28,7 @@ from helpers import (
     reset_ledger,
     reset_submissions,
     reset_queue,
+    submission_exists_for_message,
 )
 import gspread
 from google.oauth2.service_account import Credentials
@@ -183,6 +184,48 @@ def _update_queue_message(client, force_new: bool = False):
     from helpers import update_queue_message
     from sheets import get_queue_ws, get_submissions_ws
     update_queue_message(client, get_queue_ws(), get_submissions_ws(), REVIEW_CHANNEL_ID, force_new=force_new)
+
+
+def _process_challenge_message(client, channel_id: str, message_ts: str, user_id: str,
+                               text_raw: str, files: list, logger) -> bool:
+    """React to a challenge submission and add it to the queue. Returns True if added."""
+    m = re.match(r"(?i)challenges?\s*(.*)", (text_raw or "").strip())
+    member_text = (m.group(1).strip() if m else "").strip() or "_No description_"
+    media_urls = []
+    for f in files or []:
+        url = f.get("url_private") or f.get("permalink", "")
+        if url:
+            media_urls.append({"url": url, "mimetype": f.get("mimetype", "")})
+    photo_url_storage = "|".join(m.get("url", "") for m in media_urls)
+    message_url = f"{channel_id}|{message_ts}"
+    submission_id = f"SUB-{message_ts}"
+
+    team = get_user_team(members_ws, user_id)
+    if not team:
+        return False
+
+    try:
+        num = random.randint(0, 1)
+        client.reactions_add(
+            channel=channel_id,
+            timestamp=message_ts,
+            name=["codecomp-1", "codecomp-2"][num],
+        )
+    except Exception as e:
+        logger.warning("Failed to add reaction: %s", e)
+
+    add_submission(
+        submissions_ws,
+        submission_id=submission_id,
+        slack_user_id=user_id,
+        team=team,
+        member_text=member_text,
+        message_url=message_url,
+        photo_url=photo_url_storage,
+        challenge_key="",
+        points=0,
+    )
+    return True
 
 
 @app.event("message")
@@ -446,19 +489,6 @@ def handle_message_events(event, client, logger):
     if channel_id == CHALLENGE_CHANNEL_ID and text.startswith("challenge") and files:
         logger.info("Challenge submission detected")
 
-        # React with one of the CodeComp emojis
-        num = random.randint(0, 1)
-        photo_options = ["codecomp-1", "codecomp-2"]
-        try:
-            client.reactions_add(
-                channel=channel_id,
-                timestamp=message_ts,
-                name=photo_options[num],
-            )
-        except Exception as e:
-            logger.warning("Failed to add reaction: %s", e)
-
-        # Look up user's team
         team = get_user_team(members_ws, user_id)
         if not team:
             client.chat_postMessage(
@@ -468,36 +498,11 @@ def handle_message_events(event, client, logger):
             )
             return
 
-        # Extract description: text after "challenge" or "challenges"
-        raw_after = (event.get("text") or "").strip()
-        m = re.match(r"(?i)challenges?\s*(.*)", raw_after)
-        member_text = (m.group(1).strip() if m else "").strip() or "_No description_"
-
-        # Collect media URLs
-        media_urls = []
-        for f in files or []:
-            url = f.get("url_private") or f.get("permalink", "")
-            if url:
-                media_urls.append({"url": url, "mimetype": f.get("mimetype", "")})
-        photo_url_storage = "|".join(m.get("url", "") for m in media_urls)
-
-        submission_id = f"SUB-{message_ts}"
-        # Store channel|ts so we can reply in the original thread on reject.
-        message_url = f"{channel_id}|{message_ts}"
-
         try:
-            add_submission(
-                submissions_ws,
-                submission_id=submission_id,
-                slack_user_id=user_id,
-                team=team,
-                member_text=member_text,
-                message_url=message_url,
-                photo_url=photo_url_storage,
-                challenge_key="",
-                points=0,
+            _process_challenge_message(
+                client, channel_id, message_ts, user_id,
+                event.get("text") or "", files, logger,
             )
-            # Just update the queue message; no DM/confirmation to the submitter.
             _update_queue_message(client)
         except Exception as e:
             logger.exception("Challenge submit failed")
@@ -512,5 +517,58 @@ def handle_message_events(event, client, logger):
 # Register Listeners
 register_listeners(app)
 
+
+def _startup_refresh_queue():
+    """Local-only: 1) Mark all channel messages (react + add to sheet), 2) then post queue."""
+    logger = logging.getLogger(__name__)
+    try:
+        # 1) Fetch challenge channel history and process any unmarked submissions first
+        oldest_ts = str(int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp()))
+        try:
+            resp = app.client.conversations_history(
+                channel=CHALLENGE_CHANNEL_ID,
+                limit=200,
+                oldest=oldest_ts,
+            )
+            messages = resp.get("messages", []) if resp.get("ok") else []
+        except Exception as e:
+            logger.warning("Could not fetch channel history: %s", e)
+            messages = []
+
+        added = 0
+        for msg in messages:
+            if msg.get("bot_id"):
+                continue
+            text_raw = (msg.get("text") or "").strip()
+            if not re.match(r"(?i)challenges?\s*", text_raw):
+                continue
+            files = msg.get("files") or []
+            if not files:
+                continue
+            msg_ts = msg.get("ts", "")
+            user_id = msg.get("user", "")
+            if not msg_ts or not user_id:
+                continue
+            if submission_exists_for_message(submissions_ws, msg_ts):
+                continue
+            try:
+                _process_challenge_message(
+                    app.client, CHALLENGE_CHANNEL_ID, msg_ts, user_id, text_raw, files, logger,
+                )
+                added += 1
+            except Exception as e:
+                logger.warning("Startup: failed to process message %s: %s", msg_ts, e)
+
+        if added:
+            logger.info("Startup: marked %d unmarked submission(s) from channel history.", added)
+
+        # 2) Post the queue (all messages are now marked)
+        _update_queue_message(app.client, force_new=True)
+        logger.info("Startup: review queue posted.")
+    except Exception as e:
+        logging.warning("Startup queue refresh failed (queue will appear on first interaction): %s", e)
+
+
 if __name__ == "__main__":
+    _startup_refresh_queue()
     app.start(port=3000)

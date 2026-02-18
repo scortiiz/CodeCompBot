@@ -52,11 +52,11 @@ def reject_reason_view_callback(ack: Ack, body: dict, client: WebClient, view: d
             queue_msg_ts = queue_msg_ts or (parts[1] if len(parts) > 1 else "")
             queue_ch_id = queue_ch_id or (parts[2] if len(parts) > 2 else "")
 
-        if not already_rejected and queue_msg_ts and queue_ch_id and REVIEW_CHANNEL_ID:
+        if not already_rejected and queue_msg_ts and queue_ch_id:
             ts_slack = _to_slack_ts(queue_msg_ts)
             if ts_slack:
                 client.chat_postMessage(
-                    channel=REVIEW_CHANNEL_ID,
+                    channel=queue_ch_id,
                     thread_ts=ts_slack,
                     text=f"AWKKK... *Rejected* by <@{user_id}>:\n\n{rejection_message}",
                 )

@@ -320,6 +320,11 @@ def get_submission_by_id(submissions_ws, submission_id: str) -> dict | None:
     return None
 
 
+def submission_exists_for_message(submissions_ws, message_ts: str) -> bool:
+    """Check if we already have a submission for this challenge-channel message (SUB-{ts})."""
+    return get_submission_by_id(submissions_ws, f"SUB-{message_ts}") is not None
+
+
 def update_submission_status(submissions_ws, submission_id: str, status: str, reviewed_by: str = "",
                              challenge_key: str | None = None, points: int | None = None) -> bool:
     """Update submission status, reviewed_by, and optionally challenge_key/points. Returns True if updated."""
@@ -350,15 +355,18 @@ def add_ledger_entry(ledger_ws, team: str, points_delta: int, challenge_key: str
 
 
 def _to_slack_ts(val) -> str | None:
-    """Convert value to Slack thread_ts string. Must be string or Slack fails silently."""
+    """Convert value to Slack thread_ts string. Preserves format - Slack requires exact ts for threading."""
     if val is None or val == "":
         return None
+    s = str(val).strip()
+    if not s:
+        return None
     try:
-        f = float(val)
-        return f"{f:.6f}".rstrip("0").rstrip(".") or f"{f:.6f}"
+        f = float(s)
+        # Use full 6 decimal places - Slack threading fails silently with abbreviated formats
+        return f"{f:.6f}"
     except (TypeError, ValueError):
-        s = str(val).strip()
-        return s if s else None
+        return s
 
 
 def get_queue_ref(queue_ws) -> tuple[str | None, str | None]:

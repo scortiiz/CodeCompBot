@@ -209,9 +209,9 @@ def review_accept_callback(ack: Ack, client: WebClient, body: dict, logger: Logg
 
         if not already_approved and queue_msg_ts and queue_ch_id:
             ts_slack = _to_slack_ts(queue_msg_ts)
-            if ts_slack and REVIEW_CHANNEL_ID:
+            if ts_slack:
                 client.chat_postMessage(
-                    channel=REVIEW_CHANNEL_ID,
+                    channel=queue_ch_id,
                     thread_ts=ts_slack,
                     text=f"✅ *Approved* by <@{user_id}> – {points} pts added to *{team}*",
                 )
