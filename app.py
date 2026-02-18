@@ -1,7 +1,8 @@
 import os
 import re
 import logging
-from datetime import datetime, timedelta, timezone
+import json
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 import random
 
@@ -27,7 +28,6 @@ from helpers import (
     reset_ledger,
     reset_submissions,
     reset_queue,
-    submission_exists_for_message,
 )
 import gspread
 from google.oauth2.service_account import Credentials
@@ -50,8 +50,29 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "service_account.json")
-creds = Credentials.from_service_account_file(credentials_path, scopes=SCOPES)
+# Prefer JSON credentials from an environment variable (for platforms like Render),
+# but fall back to a file path when available.
+credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+
+creds = None
+if service_account_json:
+    try:
+        info = json.loads(service_account_json)
+        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    except json.JSONDecodeError:
+        logging.error("GOOGLE_SERVICE_ACCOUNT_JSON is set but contains invalid JSON.")
+
+if creds is None and credentials_path and os.path.exists(credentials_path):
+    creds = Credentials.from_service_account_file(credentials_path, scopes=SCOPES)
+
+if creds is None:
+    raise RuntimeError(
+        "Google service account credentials are not configured. "
+        "Set GOOGLE_SERVICE_ACCOUNT_JSON to the JSON contents of your service account "
+        "or provide a valid GOOGLE_APPLICATION_CREDENTIALS file path."
+    )
+
 gs_client = gspread.authorize(creds)
 sheet = gs_client.open_by_key(SPREADSHEET_ID)
 
@@ -286,7 +307,6 @@ def handle_message_events(event, client, logger):
                 challenge_key="",
                 points=0,
             )
-            _update_queue_message(client)
             client.chat_postMessage(
                 channel=channel_id,
                 text=f" Admin submission created for *{team}*. Open Review to assign challenge.",
@@ -398,8 +418,8 @@ def handle_message_events(event, client, logger):
             )
         return
 
-    # ---- Resend review queue message (review channel only, admin) ----
-    if channel_id == REVIEW_CHANNEL_ID and text in ("resend queue", "resend review queue") and is_admin(user_id):
+    # ---- Queue: post/refresh review queue (review channel only, admin) ----
+    if channel_id == REVIEW_CHANNEL_ID and text in ("queue", "resend queue", "resend review queue") and is_admin(user_id):
         try:
             # Force posting a brand new queue message with Review button
             _update_queue_message(client, force_new=True)
@@ -502,7 +522,6 @@ def handle_message_events(event, client, logger):
                 client, channel_id, message_ts, user_id,
                 event.get("text") or "", files, logger,
             )
-            _update_queue_message(client)
         except Exception as e:
             logger.exception("Challenge submit failed")
             client.chat_postMessage(
@@ -517,58 +536,6 @@ def handle_message_events(event, client, logger):
 register_listeners(app)
 
 
-def _startup_refresh_queue():
-    """Local-only: 1) Mark all channel messages (react + add to sheet), 2) then post queue."""
-    logger = logging.getLogger(__name__)
-    try:
-        # 1) Fetch challenge channel history and process any unmarked submissions first
-        oldest_ts = str(int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp()))
-        try:
-            resp = app.client.conversations_history(
-                channel=CHALLENGE_CHANNEL_ID,
-                limit=200,
-                oldest=oldest_ts,
-            )
-            messages = resp.get("messages", []) if resp.get("ok") else []
-        except Exception as e:
-            logger.warning("Could not fetch channel history: %s", e)
-            messages = []
-
-        added = 0
-        for msg in messages:
-            if msg.get("bot_id"):
-                continue
-            text_raw = (msg.get("text") or "").strip()
-            if not re.match(r"(?i)challenges?\s*", text_raw):
-                continue
-            files = msg.get("files") or []
-            if not files:
-                continue
-            msg_ts = msg.get("ts", "")
-            user_id = msg.get("user", "")
-            if not msg_ts or not user_id:
-                continue
-            if submission_exists_for_message(submissions_ws, msg_ts):
-                continue
-            try:
-                _process_challenge_message(
-                    app.client, CHALLENGE_CHANNEL_ID, msg_ts, user_id, text_raw, files, logger,
-                )
-                added += 1
-            except Exception as e:
-                logger.warning("Startup: failed to process message %s: %s", msg_ts, e)
-
-        if added:
-            logger.info("Startup: marked %d unmarked submission(s) from channel history.", added)
-
-        # 2) Post the queue (all messages are now marked)
-        _update_queue_message(app.client, force_new=True)
-        logger.info("Startup: review queue posted.")
-    except Exception as e:
-        logging.warning("Startup queue refresh failed (queue will appear on first interaction): %s", e)
-
-
 if __name__ == "__main__":
-    _startup_refresh_queue()
     port = int(os.environ.get("PORT", "3000"))
     app.start(host="0.0.0.0", port=port)

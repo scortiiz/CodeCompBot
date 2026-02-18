@@ -111,14 +111,14 @@ Type these messages in the challenge or review channel (as noted). All commands 
 |---------|-------|-------------|
 | `admin submit [team] [description]` | Any channel | Submit on behalf of a team; assign challenge in Review modal (attach photo) |
 | `reset semester` | Review channel | Clear ledger, submissions, and queue for new semester |
-| `resend queue` / `resend review queue` | Review channel | Refresh the review queue message |
+| `queue` / `resend queue` / `resend review queue` | Review channel | Post or refresh the review queue message (approve/reject replies thread under it) |
 | `surprise [points] [challenge name] \| [optional prize]` | Review channel | Create a surprise challenge (e.g. `surprise 5 3+ show up to CodeSoccer \| free boba`) |
 
 ### Other actions
 
 | Action | Description |
 |--------|-------------|
-| **Review** button (on queue message) | Open the review modal to approve/reject the next pending submission |
+| **Review** button (on queue message) | Open the review modal to approve/reject the next pending submission. Approve/reject replies appear as threads under the queue message. |
 | **Add to review queue** (message shortcut) | Right‑click a message → shortcut → add to review queue for unmarked submissions (admin only) |
 
 **Note:** Sheet headers must match: `slack_user_id`, `name`, `team` (Members); `challenge_key`, `challenge_name`, `points`, `min_num` (Challenges); `submission_id`, `created_at`, `slack_user_id`, `team`, `member_text`, `message_url`, `photo_url`, `status`, `challenge_key`, `points`, `reviewed_by` (Submissions); `timestamp`, `team`, `points_delta`, `challenge_key`, `submission_id`, `reviewed_by` (Ledger); `message_ts`, `channel_id` (Queue – one row for the single review queue message).

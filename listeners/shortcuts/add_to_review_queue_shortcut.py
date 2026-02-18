@@ -13,10 +13,10 @@ from sheets import get_submissions_ws
 CHALLENGE_CHANNEL_ID = os.environ.get("CHALLENGE_CHANNEL_ID", "")
 
 
-def _get_app_refs():
+def _get_process_challenge_message():
     """Lazy import to avoid circular dependency."""
     import app as _app
-    return _app._process_challenge_message, _app._update_queue_message
+    return _app._process_challenge_message
 
 
 def add_to_review_queue_callback(
@@ -85,11 +85,10 @@ def add_to_review_queue_callback(
             )
             return
 
-        process_msg, update_queue = _get_app_refs()
+        process_msg = _get_process_challenge_message()
         process_msg(
             client, channel_id, msg_ts, msg_user_id, text_raw, files, logger,
         )
-        update_queue(client)
 
         client.chat_postEphemeral(
             channel=channel_id,
