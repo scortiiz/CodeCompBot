@@ -88,6 +88,11 @@ try:
 except Exception:
     queue_ws = sheet.add_worksheet(title="Queue", rows=10, cols=5)
 
+# Message deduplication: track processed message timestamps to prevent duplicate processing
+# This is important for Render deployments where the service may wake up and process events multiple times
+_processed_messages = set()
+_MAX_PROCESSED_MESSAGES = 1000  # Limit size to prevent memory issues
+
 
 def _normalize(text: str) -> str:
     """Collapse multiple spaces, strip, lowercase. Makes commands tolerant of typos/spaces."""
@@ -252,9 +257,34 @@ def _process_challenge_message(client, channel_id: str, message_ts: str, user_id
 
 @app.event("message")
 def handle_message_events(event, client, logger):
+    # 0️⃣ Deduplication: Skip if we've already processed this message
+    # This prevents duplicate responses when the service wakes up on Render
+    message_ts = event.get("ts")
+    if not message_ts:
+        # No timestamp, can't deduplicate - log and continue (shouldn't happen in normal operation)
+        logger.warning("Message event missing timestamp, skipping deduplication")
+    elif message_ts in _processed_messages:
+        logger.debug(f"Skipping duplicate message: {message_ts}")
+        return
+    
+    # Add to processed set (with size limit to prevent memory issues)
+    if message_ts:
+        if len(_processed_messages) >= _MAX_PROCESSED_MESSAGES:
+            # Clear set when full to prevent memory issues
+            _processed_messages.clear()
+        _processed_messages.add(message_ts)
+    
     # 1️⃣ Ignore bot messages and edits – but allow file_share (messages with photo attachments)
     subtype = event.get("subtype")
     if subtype is not None and subtype != "file_share":
+        return
+    
+    # 1️⃣b Prevent bot from responding to its own messages
+    # Check if message is from a bot (bot_id indicates any bot message)
+    # Note: We still process file_share messages from bots (handled above)
+    bot_id = event.get("bot_id")
+    if bot_id and subtype != "file_share":
+        # This is a bot message (not a file_share), skip it
         return
 
     # 2️⃣ Pull out basic fields (normalize for forgiving command matching)
@@ -263,7 +293,6 @@ def handle_message_events(event, client, logger):
     channel_id = event.get("channel")
     user_id = event.get("user")
     files = event.get("files", [])
-    message_ts = event.get("ts")
     thread_ts = event.get("thread_ts")
 
     # ---- Admin submit works in ANY channel (check first) ----
