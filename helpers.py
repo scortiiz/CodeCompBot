@@ -386,15 +386,17 @@ def get_queue_ref(queue_ws) -> tuple[str | None, str | None]:
 def update_queue_message(client, queue_ws, submissions_ws, review_channel_id: str, force_new: bool = False) -> tuple[str | None, str | None]:
     """Create or update the single review queue message.
 
-    If force_new is True, always post a fresh message (with Review button)
-    and update the stored reference so all future approvals/rejections thread
-    under the newest queue message.
+    If force_new is True, post a fresh message (with Review button) and update the
+    stored reference. Use "queue" / "resend queue" for that.
 
-    Returns (message_ts, channel_id) of the current queue message for threading.
+    When force_new is False (e.g. after each review), only UPDATE the existing
+    queue message in place. Never post a new message so the channel stays clean.
+    If no ref exists or update fails, returns existing ref for threading; no new post.
     """
     try:
         count = get_pending_count(submissions_ws)
         msg_ts, ch_id = get_queue_ref(queue_ws)
+        text = f"Review queue: {count} pending"
         blocks = [
             {"type": "section", "text": {"type": "mrkdwn", "text": f"*Review queue:* {count} pending"}},
             {"type": "actions", "elements": [{"type": "button", "text": {"type": "plain_text", "text": "Review"}, "style": "primary", "action_id": "open_review_modal", "value": "queue"}]},
@@ -404,24 +406,18 @@ def update_queue_message(client, queue_ws, submissions_ws, review_channel_id: st
 
         if ts_str and ch_str and not force_new:
             try:
-                client.chat_update(channel=ch_str, ts=ts_str, blocks=blocks)
+                client.chat_update(channel=ch_str, ts=ts_str, text=text, blocks=blocks)
                 return ts_str, ch_str
             except Exception as e:
-                logger.warning("chat_update failed, posting fresh queue message: %s", e)
-                resp = client.chat_postMessage(channel=review_channel_id, blocks=blocks)
-                ts_new = _to_slack_ts(resp.get("ts") or resp.get("message", {}).get("ts"))
-                if ts_new:
-                    set_queue_ref(queue_ws, ts_new, review_channel_id)
-                    try:
-                        client.chat_delete(channel=ch_str, ts=ts_str)
-                    except Exception:
-                        pass
-                    return ts_new, review_channel_id
-        resp = client.chat_postMessage(channel=review_channel_id, blocks=blocks)
-        ts_new = _to_slack_ts(resp.get("ts") or resp.get("message", {}).get("ts"))
-        if ts_new:
-            set_queue_ref(queue_ws, ts_new, review_channel_id)
-            return ts_new, review_channel_id
+                logger.warning("chat_update failed (queue message not updated in place): %s", e)
+                return ts_str, ch_str
+        if force_new:
+            resp = client.chat_postMessage(channel=review_channel_id, text=text, blocks=blocks)
+            ts_new = _to_slack_ts(resp.get("ts") or resp.get("message", {}).get("ts"))
+            if ts_new:
+                set_queue_ref(queue_ws, ts_new, review_channel_id)
+                return ts_new, review_channel_id
+        return msg_ts and _to_slack_ts(msg_ts), ch_str or None
     except Exception:
         pass
     return None, None

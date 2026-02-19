@@ -93,6 +93,21 @@ def _build_review_modal(submission: dict, submission_id: str, queue_msg_ts: str,
             "option_groups": option_groups,
         },
     })
+    extra_point_options = [
+        {"text": {"type": "plain_text", "text": "No extra"}, "value": "0"},
+        *[{"text": {"type": "plain_text", "text": f"+{i} pt" if i == 1 else f"+{i} pts"}, "value": str(i)} for i in range(1, 9)],
+    ]
+    blocks.append({
+        "type": "section",
+        "block_id": "extra_points_block",
+        "text": {"type": "mrkdwn", "text": "*Extra points* (optional reward):"},
+        "accessory": {
+            "type": "static_select",
+            "action_id": "extra_points_select",
+            "placeholder": {"type": "plain_text", "text": "0 (none)"},
+            "options": extra_point_options,
+        },
+    })
     blocks.append({
         "type": "actions",
         "block_id": "review_actions",
@@ -112,6 +127,11 @@ def _build_review_modal(submission: dict, submission_id: str, queue_msg_ts: str,
 
 def challenge_select_callback(ack: Ack, body: dict):
     """Ack dropdown selection so Slack doesn't show 404. Value is stored in modal state for Accept."""
+    ack()
+
+
+def extra_points_select_callback(ack: Ack):
+    """Ack extra points dropdown selection. Value is stored in modal state for Accept."""
     ack()
 
 
@@ -180,6 +200,15 @@ def review_accept_callback(ack: Ack, client: WebClient, body: dict, logger: Logg
             points = int(points_str) if points_str else 0
         else:
             challenge_key, points = val, 0
+        extra_points = 0
+        extra_block = values.get("extra_points_block", {}).get("extra_points_select", {})
+        extra_opt = extra_block.get("selected_option")
+        if extra_opt:
+            try:
+                extra_points = int(extra_opt.get("value", "0") or "0")
+            except (TypeError, ValueError):
+                pass
+        points = points + extra_points
         private = view.get("private_metadata", "")
         parts = private.split("|")
         submission_id = parts[0] if parts else ""
