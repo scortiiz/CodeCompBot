@@ -287,36 +287,56 @@ def reset_queue(queue_ws) -> None:
         pass
 
 
-def get_next_pending_submission(submissions_ws) -> dict | None:
-    """Get oldest PENDING submission (first in queue)."""
-    try:
-        rows = submissions_ws.get_all_records()
-        for row in rows:
-            if (row.get("status", "").strip().lower() or "") == "pending":
-                return row
-    except Exception:
-        pass
+def get_next_pending_submission(submissions_ws, rows: list[dict] | None = None) -> dict | None:
+    """Get oldest PENDING submission (first in queue).
+
+    This helper is used in performance‑sensitive review flows. To avoid
+    multiple round‑trips to Google Sheets in a single interaction, callers
+    may pass a pre‑fetched list of submission records via the optional
+    `rows` argument. When `rows` is not provided, this function falls back
+    to calling `get_all_records()` internally.
+    """
+    if rows is None:
+        try:
+            rows = submissions_ws.get_all_records()
+        except Exception:
+            return None
+
+    for row in rows:
+        if (row.get("status", "").strip().lower() or "") == "pending":
+            return row
     return None
 
 
-def get_pending_count(submissions_ws) -> int:
-    """Count PENDING submissions."""
-    try:
-        rows = submissions_ws.get_all_records()
-        return sum(1 for row in rows if (row.get("status", "").strip().lower() or "") == "pending")
-    except Exception:
-        return 0
+def get_pending_count(submissions_ws, rows: list[dict] | None = None) -> int:
+    """Count PENDING submissions.
+
+    For best performance in flows that already have all submissions loaded,
+    callers may pass a pre‑fetched `rows` list to avoid extra network calls.
+    """
+    if rows is None:
+        try:
+            rows = submissions_ws.get_all_records()
+        except Exception:
+            return 0
+
+    return sum(
+        1
+        for row in rows
+        if (row.get("status", "").strip().lower() or "") == "pending"
+    )
 
 
 def get_submission_by_id(submissions_ws, submission_id: str) -> dict | None:
     """Get submission row by submission_id."""
     try:
         rows = submissions_ws.get_all_records()
-        for row in rows:
-            if str(row.get("submission_id", "")).strip() == submission_id:
-                return row
     except Exception:
-        pass
+        return None
+
+    for row in rows:
+        if str(row.get("submission_id", "")).strip() == submission_id:
+            return row
     return None
 
 
@@ -383,7 +403,14 @@ def get_queue_ref(queue_ws) -> tuple[str | None, str | None]:
     return None, None
 
 
-def update_queue_message(client, queue_ws, submissions_ws, review_channel_id: str, force_new: bool = False) -> tuple[str | None, str | None]:
+def update_queue_message(
+    client,
+    queue_ws,
+    submissions_ws,
+    review_channel_id: str,
+    force_new: bool = False,
+    submissions_rows: list[dict] | None = None,
+) -> tuple[str | None, str | None]:
     """Create or update the single review queue message.
 
     If force_new is True, post a fresh message (with Review button) and update the
@@ -394,7 +421,7 @@ def update_queue_message(client, queue_ws, submissions_ws, review_channel_id: st
     If no ref exists or update fails, returns existing ref for threading; no new post.
     """
     try:
-        count = get_pending_count(submissions_ws)
+        count = get_pending_count(submissions_ws, submissions_rows)
         msg_ts, ch_id = get_queue_ref(queue_ws)
         text = f"Review queue: {count} pending"
         blocks = [

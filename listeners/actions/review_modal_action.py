@@ -218,20 +218,52 @@ def review_accept_callback(ack: Ack, client: WebClient, body: dict, logger: Logg
         submissions_ws = get_submissions_ws()
         ledger_ws = get_ledger_ws()
         members_ws = get_members_ws()
-        submission = get_submission_by_id(submissions_ws, submission_id)
+
+        # Load all submissions once for this interaction so we can:
+        # - find the current submission
+        # - update the local copy after writing to Sheets
+        # - reuse the same list for both queue count and next‑pending lookup
+        submissions_rows = submissions_ws.get_all_records()
+        submission = None
+        submission_index = None
+        for idx, row in enumerate(submissions_rows):
+            if str(row.get("submission_id", "")).strip() == submission_id:
+                submission = row
+                submission_index = idx
+                break
         if not submission:
             return
         already_approved = (submission.get("status", "") or "").strip().lower() == "approved"
 
         team = submission.get("team", "").strip()
         reviewer_name = get_reviewer_display_name(client, members_ws, user_id)
-        update_submission_status(submissions_ws, submission_id, "APPROVED", reviewer_name, challenge_key=challenge_key, points=points)
+        update_submission_status(
+            submissions_ws,
+            submission_id,
+            "APPROVED",
+            reviewer_name,
+            challenge_key=challenge_key,
+            points=points,
+        )
+
+        # Keep local copy in sync so we can accurately compute queue count
+        # and next pending submission without another network round‑trip.
+        if submission_index is not None:
+            submissions_rows[submission_index]["status"] = "APPROVED"
+            submissions_rows[submission_index]["points"] = points
+            submissions_rows[submission_index]["challenge_key"] = challenge_key
 
         if not already_approved:
             add_ledger_entry(ledger_ws, team, points, challenge_key, submission_id, reviewer_name)
 
         queue_ws = get_queue_ws()
-        queue_msg_ts, queue_ch_id = update_queue_message(client, queue_ws, submissions_ws, REVIEW_CHANNEL_ID)
+        queue_msg_ts, queue_ch_id = update_queue_message(
+            client,
+            queue_ws,
+            submissions_ws,
+            REVIEW_CHANNEL_ID,
+            submissions_rows=submissions_rows,
+        )
         if not queue_msg_ts or not queue_ch_id:
             queue_msg_ts = queue_msg_ts or (parts[1] if len(parts) > 1 else "")
             queue_ch_id = queue_ch_id or (parts[2] if len(parts) > 2 else "")
@@ -253,8 +285,9 @@ def review_accept_callback(ack: Ack, client: WebClient, body: dict, logger: Logg
                     client.chat_postMessage(channel=CHALLENGE_CHANNEL_ID, text=msg)
                     break
 
-        # Auto-advance to next pending submission in the same modal
-        next_submission = get_next_pending_submission(submissions_ws)
+        # Auto-advance to next pending submission in the same modal, using the
+        # same submissions list we already loaded (with status updated).
+        next_submission = get_next_pending_submission(submissions_ws, submissions_rows)
         if not next_submission:
             client.views_update(
                 view_id=view["id"],

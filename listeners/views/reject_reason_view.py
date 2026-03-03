@@ -40,14 +40,34 @@ def reject_reason_view_callback(ack: Ack, body: dict, client: WebClient, view: d
 
         submissions_ws = get_submissions_ws()
         members_ws = get_members_ws()
-        submission_row = get_submission_by_id(submissions_ws, submission_id)
+
+        # Load all submissions once for this interaction; we'll keep this list
+        # in sync after writing to Sheets and reuse it for queue + next‑pending.
+        submissions_rows = submissions_ws.get_all_records()
+        submission_row = None
+        submission_index = None
+        for idx, row in enumerate(submissions_rows):
+            if str(row.get("submission_id", "")).strip() == submission_id:
+                submission_row = row
+                submission_index = idx
+                break
         already_rejected = (submission_row or {}).get("status", "").strip().lower() == "rejected"
 
         reviewer_name = get_reviewer_display_name(client, members_ws, user_id)
         update_submission_status(submissions_ws, submission_id, "REJECTED", reviewer_name)
 
+        # Keep local copy in sync so we can reuse it without another read.
+        if submission_index is not None:
+            submissions_rows[submission_index]["status"] = "REJECTED"
+
         queue_ws = get_queue_ws()
-        queue_msg_ts, queue_ch_id = update_queue_message(client, queue_ws, submissions_ws, REVIEW_CHANNEL_ID)
+        queue_msg_ts, queue_ch_id = update_queue_message(
+            client,
+            queue_ws,
+            submissions_ws,
+            REVIEW_CHANNEL_ID,
+            submissions_rows=submissions_rows,
+        )
         if not queue_msg_ts or not queue_ch_id:
             queue_msg_ts = queue_msg_ts or (parts[1] if len(parts) > 1 else "")
             queue_ch_id = queue_ch_id or (parts[2] if len(parts) > 2 else "")
@@ -72,8 +92,9 @@ def reject_reason_view_callback(ack: Ack, body: dict, client: WebClient, view: d
                         thread_ts=orig_ts_slack,
                         text=f"AWKKK... *Rejected* by <@{user_id}>: {rejection_message}",
                     )
-        # Auto-advance: after rejecting, show the next pending submission (or "no more").
-        next_submission = get_next_pending_submission(submissions_ws)
+        # Auto-advance: after rejecting, show the next pending submission
+        # (or "no more") using the same submissions list we already loaded.
+        next_submission = get_next_pending_submission(submissions_ws, submissions_rows)
         if not next_submission:
             ack(
                 response_action="update",
