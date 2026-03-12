@@ -83,10 +83,15 @@ def get_challenges(challenges_ws) -> list[dict]:
         return []
 
 
-def get_unique_prefixes(challenges_ws) -> list[str]:
-    """Get unique prefixes from challenge keys (e.g. SOC-001 -> SOC)."""
+def get_unique_prefixes(challenges_ws, challenges: list[dict] | None = None) -> list[str]:
+    """Get unique prefixes from challenge keys (e.g. SOC-001 -> SOC).
+
+    Pass `challenges` to avoid re-reading the sheet in hot paths.
+    """
     prefixes = set()
-    for c in get_challenges(challenges_ws):
+    if challenges is None:
+        challenges = get_challenges(challenges_ws)
+    for c in challenges:
         key = (c.get("challenge_key") or "").strip()
         if "-" in key:
             prefixes.add(key.split("-")[0].strip())
@@ -95,13 +100,25 @@ def get_unique_prefixes(challenges_ws) -> list[str]:
     return sorted(prefixes)
 
 
-def get_challenges_by_prefix(challenges_ws, prefix: str) -> list[dict]:
-    """Get challenges whose challenge_key starts with prefix (e.g. SOC)."""
+def get_challenges_by_prefix(
+    challenges_ws,
+    prefix: str,
+    challenges: list[dict] | None = None,
+) -> list[dict]:
+    """Get challenges whose challenge_key starts with prefix (e.g. SOC).
+
+    Pass `challenges` to avoid re-reading the sheet in hot paths.
+    """
     prefix_upper = (prefix or "").strip().upper()
+    if challenges is None:
+        challenges = get_challenges(challenges_ws)
     return [
-        c for c in get_challenges(challenges_ws)
-        if ((c.get("challenge_key") or "").strip().upper().startswith(prefix_upper + "-") or
-            (c.get("challenge_key") or "").strip().upper().startswith(prefix_upper))
+        c
+        for c in challenges
+        if (
+            (c.get("challenge_key") or "").strip().upper().startswith(prefix_upper + "-")
+            or (c.get("challenge_key") or "").strip().upper().startswith(prefix_upper)
+        )
     ]
 
 

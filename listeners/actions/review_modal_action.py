@@ -33,10 +33,12 @@ CHALLENGE_CHANNEL_ID = os.environ.get("CHALLENGE_CHANNEL_ID", "")
 def _build_review_modal(submission: dict, submission_id: str, queue_msg_ts: str, queue_ch_id: str = "") -> dict:
     """Build modal with prefix dropdown, challenge dropdown (option_groups), Accept and Reject buttons."""
     challenges_ws = get_challenges_ws()
-    prefixes = get_unique_prefixes(challenges_ws)
+    # IMPORTANT: avoid repeated Google Sheets reads (quota). Load challenges once.
+    challenges = get_challenges(challenges_ws)
+    prefixes = get_unique_prefixes(challenges_ws, challenges=challenges)
     option_groups = []
     for prefix in prefixes:
-        ch_list = get_challenges_by_prefix(challenges_ws, prefix)
+        ch_list = get_challenges_by_prefix(challenges_ws, prefix, challenges=challenges)
         options = [
             {
                 "text": {"type": "plain_text", "text": (c.get('challenge_name', '') or '')[:75]},
