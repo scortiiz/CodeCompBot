@@ -2,10 +2,35 @@
 
 import logging
 import os
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+# Members and Challenges rarely change, so their rows are kept in memory briefly to cut
+# Google Sheets reads. Submissions and Ledger are always read fresh.
+_CACHE_TTL = 300  # seconds
+_records_cache = {}  # sheet title -> (timestamp, rows)
+
+
+def cached_records(ws) -> list[dict]:
+    """get_all_records() with a short in-memory cache. Only for rarely-changing sheets."""
+    now = time.monotonic()
+    hit = _records_cache.get(ws.title)
+    if hit and now - hit[0] < _CACHE_TTL:
+        return hit[1]
+    rows = ws.get_all_records()
+    _records_cache[ws.title] = (now, rows)
+    return rows
+
+
+def clear_cache(title: str | None = None) -> None:
+    """Drop cached rows so the next read hits Google again."""
+    if title:
+        _records_cache.pop(title, None)
+    else:
+        _records_cache.clear()
 
 
 def is_admin(user_id: str) -> bool:
@@ -50,7 +75,7 @@ def _row_val(row: dict, *keys: str, default: str = "") -> str:
 def get_all_teams(members_ws) -> list[str]:
     """Get unique team names from Members. Members: A=slack_user_id, B=name, C=team."""
     try:
-        rows = members_ws.get_all_records()
+        rows = cached_records(members_ws)
     except Exception:
         return []
     teams = set()
@@ -64,7 +89,7 @@ def get_all_teams(members_ws) -> list[str]:
 def get_user_team(members_ws, slack_user_id: str) -> str | None:
     """Get team for a Slack user from Members."""
     try:
-        rows = members_ws.get_all_records()
+        rows = cached_records(members_ws)
     except Exception:
         return None
     for row in rows:
@@ -78,7 +103,7 @@ def get_user_team(members_ws, slack_user_id: str) -> str | None:
 def get_challenges(challenges_ws) -> list[dict]:
     """Get all challenges. Challenges: A=challenge_key, B=challenge_name, C=points, D=min_num."""
     try:
-        return challenges_ws.get_all_records()
+        return cached_records(challenges_ws)
     except Exception:
         return []
 
@@ -125,7 +150,7 @@ def get_challenges_by_prefix(
 def get_user_name(members_ws, slack_user_id: str) -> str:
     """Get display name for a Slack user from Members."""
     try:
-        for row in members_ws.get_all_records():
+        for row in cached_records(members_ws):
             if _row_val(row, "slack_user_id", "Slack User ID") == slack_user_id:
                 name = _row_val(row, "name", "Name")
                 return name or f"<@{slack_user_id}>"
@@ -372,12 +397,16 @@ def update_submission_status(submissions_ws, submission_id: str, status: str, re
                 continue
             if len(row) > 0 and row[0] == submission_id:
                 row_idx = i + 1
-                submissions_ws.update_acell(f"H{row_idx}", status)
-                submissions_ws.update_acell(f"K{row_idx}", reviewed_by)
+                # One batch request instead of up to four single-cell writes
+                updates = [
+                    {"range": f"H{row_idx}", "values": [[status]]},
+                    {"range": f"K{row_idx}", "values": [[reviewed_by]]},
+                ]
                 if challenge_key is not None:
-                    submissions_ws.update_acell(f"I{row_idx}", str(challenge_key))
+                    updates.append({"range": f"I{row_idx}", "values": [[str(challenge_key)]]})
                 if points is not None:
-                    submissions_ws.update_acell(f"J{row_idx}", str(points))
+                    updates.append({"range": f"J{row_idx}", "values": [[str(points)]]})
+                submissions_ws.batch_update(updates, raw=False)  # USER_ENTERED, same as update_acell
                 return True
     except Exception:
         pass
@@ -520,6 +549,7 @@ def create_surprise_challenge(challenges_ws, challenge_name: str, points: int) -
     challenge_key = f"SUP-{next_num:03d}"
     try:
         challenges_ws.append_row([challenge_key, challenge_name, points, 0])
+        clear_cache(challenges_ws.title)
     except Exception:
         # Even if appending fails, still return the key so caller can handle/report
         pass

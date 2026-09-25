@@ -61,8 +61,12 @@ This app uses HTTPS (not Socket Mode). Configure your Slack app:
 For production, run with gunicorn:
 
 ```zsh
-gunicorn -b 0.0.0.0:$PORT app:app
+gunicorn -b 0.0.0.0:$PORT app:flask_app --workers 1 --threads 4
 ```
+
+Use `app:flask_app` (the Flask server), not `app:app` (the Bolt app object, which gunicorn can't serve). One worker with several threads keeps the in-memory sheet cache shared while letting slow Sheets calls run side by side.
+
+**Keeping Render's free tier awake:** the free plan sleeps after 15 minutes idle and takes 30–60s to wake, which also makes Slack retry events. Point a free uptime monitor (e.g. UptimeRobot or cron-job.org) at `https://<your-app>.onrender.com/health` every 10 minutes.
 
 Set `PORT` (default 3000). Bolt mounts at `/slack/events` by default.
 
@@ -113,6 +117,7 @@ Type these messages in the challenge or review channel (as noted). All commands 
 | `reset semester` | Review channel | Clear ledger, submissions, and queue for new semester |
 | `queue` / `resend queue` / `resend review queue` | Review channel | Post or refresh the review queue message (approve/reject replies thread under it) |
 | `surprise [points] [challenge name] \| [optional prize]` | Review channel | Create a surprise challenge (e.g. `surprise 5 3+ show up to CodeSoccer \| free boba`) |
+| `refresh` | Review channel | Re-read Members and Challenges from the sheet now (they're cached for 5 minutes, so hand edits otherwise take up to 5 minutes to show) |
 
 ### Other actions
 
