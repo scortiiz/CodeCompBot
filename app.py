@@ -1,7 +1,6 @@
 import os
 import re
 import logging
-import json
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 import random
@@ -30,11 +29,11 @@ from helpers import (
     reset_ledger,
     reset_submissions,
     reset_queue,
+    clear_cache,
 )
-import gspread
-from google.oauth2.service_account import Credentials
+from sheets import get_members_ws, get_submissions_ws, get_challenges_ws, get_ledger_ws, get_queue_ws
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 # Initialization
 load_dotenv()
@@ -45,48 +44,13 @@ app = App(
 
 CHALLENGE_CHANNEL_ID = os.environ["CHALLENGE_CHANNEL_ID"]
 REVIEW_CHANNEL_ID = os.environ["REVIEW_CHANNEL_ID"]
-SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
-# Prefer JSON credentials from an environment variable (for platforms like Render),
-# but fall back to a file path when available.
-credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-
-creds = None
-if service_account_json:
-    try:
-        info = json.loads(service_account_json)
-        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-    except json.JSONDecodeError:
-        logging.error("GOOGLE_SERVICE_ACCOUNT_JSON is set but contains invalid JSON.")
-
-if creds is None and credentials_path and os.path.exists(credentials_path):
-    creds = Credentials.from_service_account_file(credentials_path, scopes=SCOPES)
-
-if creds is None:
-    raise RuntimeError(
-        "Google service account credentials are not configured. "
-        "Set GOOGLE_SERVICE_ACCOUNT_JSON to the JSON contents of your service account "
-        "or provide a valid GOOGLE_APPLICATION_CREDENTIALS file path."
-    )
-
-gs_client = gspread.authorize(creds)
-sheet = gs_client.open_by_key(SPREADSHEET_ID)
-
-members_ws = sheet.worksheet("Members")
-submissions_ws = sheet.worksheet("Submissions")
-challenges_ws = sheet.worksheet("Challenges")
-ledger_ws = sheet.worksheet("Ledger")
-
-try:
-    queue_ws = sheet.worksheet("Queue")
-except Exception:
-    queue_ws = sheet.add_worksheet(title="Queue", rows=10, cols=5)
+# Worksheets are shared with the listeners via sheets.py so each tab is looked up once
+members_ws = get_members_ws()
+submissions_ws = get_submissions_ws()
+challenges_ws = get_challenges_ws()
+ledger_ws = get_ledger_ws()
+queue_ws = get_queue_ws()
 
 # Message deduplication: track processed message timestamps to prevent duplicate processing
 # This is important for Render deployments where the service may wake up and process events multiple times
@@ -518,6 +482,16 @@ def handle_message_events(event, client, logger):
         )
         return
 
+    # ---- Refresh cached Members/Challenges after editing the sheet by hand (review channel only, admin) ----
+    if channel_id == REVIEW_CHANNEL_ID and text == "refresh" and is_admin(user_id):
+        clear_cache()
+        client.chat_postMessage(
+            channel=channel_id,
+            text="✅ Cache cleared. Members and challenges will be re-read from the sheet.",
+            thread_ts=thread_ts or message_ts,
+        )
+        return
+
     if text == "reset semester" and not is_admin(user_id):
         client.chat_postMessage(
             channel=channel_id,
@@ -574,6 +548,12 @@ handler = SlackRequestHandler(app)
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
     return handler.handle(request)
+
+
+@flask_app.route("/health", methods=["GET"])
+def health():
+    """Pinged by an uptime monitor so Render's free tier doesn't put the app to sleep."""
+    return "ok", 200
 
 
 if __name__ == "__main__":

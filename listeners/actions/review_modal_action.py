@@ -148,11 +148,12 @@ def open_review_modal_callback(ack: Ack, client: WebClient, body: dict, logger: 
         if not action:
             return
         trigger_id = body.get("trigger_id", "")
-        queue_ws = get_queue_ws()
-        queue_msg_ts, queue_ch_id = get_queue_ref(queue_ws)
+        # Thread replies under the exact message whose Review button was clicked. Slack sends its
+        # ts verbatim; the copy stored in the Queue sheet is only a fallback.
+        queue_msg_ts = body.get("message", {}).get("ts", "")
+        queue_ch_id = body.get("channel", {}).get("id", "")
         if not queue_msg_ts or not queue_ch_id:
-            queue_msg_ts = body.get("message", {}).get("ts", "")
-            queue_ch_id = body.get("channel", {}).get("id", "")
+            queue_msg_ts, queue_ch_id = get_queue_ref(get_queue_ws())
 
         loading_modal = {
             "type": "modal",
@@ -259,16 +260,17 @@ def review_accept_callback(ack: Ack, client: WebClient, body: dict, logger: Logg
             add_ledger_entry(ledger_ws, team, points, challenge_key, submission_id, reviewer_name)
 
         queue_ws = get_queue_ws()
-        queue_msg_ts, queue_ch_id = update_queue_message(
+        ref_ts, ref_ch = update_queue_message(
             client,
             queue_ws,
             submissions_ws,
             REVIEW_CHANNEL_ID,
             submissions_rows=submissions_rows,
         )
+        # Prefer the queue message the reviewer clicked (carried in private_metadata);
+        # fall back to the stored ref only if it's missing.
         if not queue_msg_ts or not queue_ch_id:
-            queue_msg_ts = queue_msg_ts or (parts[1] if len(parts) > 1 else "")
-            queue_ch_id = queue_ch_id or (parts[2] if len(parts) > 2 else "")
+            queue_msg_ts, queue_ch_id = ref_ts, ref_ch
 
         if not already_approved and queue_msg_ts and queue_ch_id:
             ts_slack = _to_slack_ts(queue_msg_ts)
