@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -427,6 +428,8 @@ def _to_slack_ts(val) -> str | None:
     s = str(val).strip()
     if not s:
         return None
+    if re.fullmatch(r"\d+\.\d{6}", s):
+        return s  # already an exact Slack ts; don't round-trip it through float
     try:
         f = float(s)
         # Use full 6 decimal places - Slack threading fails silently with abbreviated formats
@@ -497,16 +500,12 @@ def update_queue_message(
 
 
 def set_queue_ref(queue_ws, message_ts: str, channel_id: str) -> None:
-    """Store queue message ref. Expects header row 1: message_ts, channel_id."""
-    try:
-        vals = queue_ws.get_all_values()
-        if len(vals) < 2:
-            queue_ws.update("A1:B2", [["message_ts", "channel_id"], [message_ts, channel_id]])
-        else:
-            queue_ws.update_acell("A2", message_ts)
-            queue_ws.update_acell("B2", channel_id)
-    except Exception:
-        queue_ws.update("A1:B2", [["message_ts", "channel_id"], [message_ts, channel_id]])
+    """Store queue message ref in row 2 (header row 1: message_ts, channel_id).
+
+    Written RAW so Sheets keeps the ts as text. USER_ENTERED turns it into a number and
+    drops digits, and Slack then posts "threaded" replies as top-level channel messages.
+    """
+    queue_ws.update([["message_ts", "channel_id"], [str(message_ts), str(channel_id)]], "A1:B2", raw=True)
 
 
 def find_challenge_by_name(challenges_ws, name: str) -> dict | None:
