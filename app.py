@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -217,6 +218,44 @@ def _process_challenge_message(client, channel_id: str, message_ts: str, user_id
         points=0,
     )
     return True
+
+
+def _backfill_submissions(client, logger) -> tuple[int, set[str]]:
+    """Queue challenge-channel submissions posted before the bot joined.
+    Returns (number added, user IDs skipped because they have no team)."""
+    # Read existing submission IDs once instead of once per message
+    existing = set(submissions_ws.col_values(1))
+    added = 0
+    no_team = set()
+    messages = []
+    cursor = None
+    while True:
+        resp = client.conversations_history(channel=CHALLENGE_CHANNEL_ID, limit=200, cursor=cursor)
+        messages.extend(resp.get("messages", []))
+        cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+        if not cursor:
+            break
+    # Slack returns newest first; go oldest first so the queue matches posting order
+    for msg in reversed(messages):
+        subtype = msg.get("subtype")
+        if (subtype is not None and subtype != "file_share") or msg.get("bot_id"):
+            continue
+        ts = msg.get("ts", "")
+        msg_user = msg.get("user", "")
+        text_raw = (msg.get("text") or "").strip()
+        files = msg.get("files") or []
+        if not ts or not msg_user or not files or not _normalize(text_raw).startswith("challenge"):
+            continue
+        if f"SUB-{ts}" in existing:
+            continue
+        if _process_challenge_message(client, CHALLENGE_CHANNEL_ID, ts, msg_user, text_raw, files, logger):
+            existing.add(f"SUB-{ts}")
+            added += 1
+            # Stay under the Google Sheets write quota (60/min) and Slack's reactions rate limit
+            time.sleep(1.1)
+        else:
+            no_team.add(msg_user)
+    return added, no_team
 
 
 @app.event("message")
@@ -480,6 +519,32 @@ def handle_message_events(event, client, logger):
             text=f"✅ Created surprise challenge *{challenge_key}* – {points} pts: {challenge_name}",
             thread_ts=thread_ts or message_ts,
         )
+        return
+
+    # ---- Backfill: queue past challenge-channel submissions the bot never saw (review channel only, admin) ----
+    if channel_id == REVIEW_CHANNEL_ID and text == "backfill" and is_admin(user_id):
+        client.chat_postMessage(
+            channel=channel_id,
+            text="Scanning the challenge channel history... this can take a minute.",
+            thread_ts=thread_ts or message_ts,
+        )
+        try:
+            added, no_team = _backfill_submissions(client, logger)
+            msg = f"✅ Backfill done. Added *{added}* past submission(s) to the review queue."
+            if no_team:
+                msg += (f"\nSkipped *{len(no_team)}* from people not in the Members sheet: "
+                        + ", ".join(f"<@{u}>" for u in sorted(no_team))
+                        + ". Add them, send `refresh`, then run `backfill` again.")
+            if added:
+                _update_queue_message(client, force_new=True)
+            client.chat_postMessage(channel=channel_id, text=msg, thread_ts=thread_ts or message_ts)
+        except Exception as e:
+            logger.exception("Backfill failed")
+            client.chat_postMessage(
+                channel=channel_id,
+                text=f"❌ Backfill failed: {e}",
+                thread_ts=thread_ts or message_ts,
+            )
         return
 
     # ---- Refresh cached Members/Challenges after editing the sheet by hand (review channel only, admin) ----
