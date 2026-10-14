@@ -14,9 +14,8 @@ from helpers import (
     get_reviewer_display_name,
     _to_slack_ts,
     is_admin,
-    get_next_pending_submission,
 )
-from listeners.actions.review_modal_action import _build_review_modal
+from listeners.actions.review_modal_action import _show_next_pending
 
 REVIEW_CHANNEL_ID = os.environ.get("REVIEW_CHANNEL_ID", "")
 
@@ -95,26 +94,18 @@ def reject_reason_view_callback(ack: Ack, body: dict, client: WebClient, view: d
                     )
         # Auto-advance: after rejecting, show the next pending submission
         # (or "no more") using the same submissions list we already loaded.
-        next_submission = get_next_pending_submission(submissions_ws, submissions_rows)
-        if not next_submission:
-            ack(
-                response_action="update",
-                view={
-                    "type": "modal",
-                    "title": {"type": "plain_text", "text": "Review Submission"},
-                    "close": {"type": "plain_text", "text": "Close"},
-                    "blocks": [
-                        {
-                            "type": "section",
-                            "text": {"type": "mrkdwn", "text": "No more submissions in the queue."},
-                        }
-                    ],
-                },
-            )
-            return
-
-        next_id = (next_submission.get("submission_id") or "").strip()
-        next_modal = _build_review_modal(next_submission, next_id, queue_msg_ts or "", queue_ch_id or "")
-        ack(response_action="update", view=next_modal)
+        # Ack with a placeholder, then views_update so image load failures surface as errors
+        # (response_action="update" fails silently) and can be skipped/marked ERROR.
+        ack(
+            response_action="update",
+            view={
+                "type": "modal",
+                "callback_id": "review_modal",
+                "title": {"type": "plain_text", "text": "Review Submission"},
+                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "Loading…"}}],
+            },
+        )
+        _show_next_pending(client, view["id"], None, submissions_ws, submissions_rows,
+                           queue_msg_ts or "", queue_ch_id or "", logger)
     except Exception as e:
         logger.exception("Reject reason view failed: %s", e)

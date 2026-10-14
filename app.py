@@ -27,6 +27,8 @@ from helpers import (
     get_challenges_by_prefix,
     get_pending_count,
     add_submission,
+    get_submission_by_id,
+    update_submission_status,
     reset_ledger,
     reset_submissions,
     reset_queue,
@@ -258,6 +260,20 @@ def _backfill_submissions(client, logger) -> tuple[int, set[str]]:
     return added, no_team
 
 
+def _mark_deleted_submission(client, message_ts: str, logger) -> None:
+    """Mark a PENDING submission ERROR when its original message is deleted."""
+    submission_id = f"SUB-{message_ts}"
+    try:
+        submission = get_submission_by_id(submissions_ws, submission_id)
+        if not submission or (submission.get("status") or "").strip().lower() != "pending":
+            return
+        update_submission_status(submissions_ws, submission_id, "ERROR", "BOT (message deleted)")
+        logger.info("Submission %s message deleted; marked ERROR", submission_id)
+        _update_queue_message(client)
+    except Exception as e:
+        logger.warning("Failed to mark deleted submission %s: %s", submission_id, e)
+
+
 @app.event("message")
 def handle_message_events(event, client, logger):
     # 0️⃣ Deduplication: Skip if we've already processed this message
@@ -279,6 +295,16 @@ def handle_message_events(event, client, logger):
     
     # 1️⃣ Ignore bot messages and edits – but allow file_share (messages with photo attachments)
     subtype = event.get("subtype")
+    # A deleted submission message drops out of the review queue. A deleted parent that has
+    # replies arrives as message_changed with a "tombstone" message instead of message_deleted.
+    deleted_ts = None
+    if subtype == "message_deleted":
+        deleted_ts = event.get("deleted_ts")
+    elif subtype == "message_changed" and (event.get("message") or {}).get("subtype") == "tombstone":
+        deleted_ts = event["message"].get("ts")
+    if deleted_ts:
+        _mark_deleted_submission(client, deleted_ts, logger)
+        return
     if subtype is not None and subtype != "file_share":
         return
     

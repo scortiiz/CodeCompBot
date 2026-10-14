@@ -4,6 +4,7 @@ from logging import Logger
 
 from slack_bolt import Ack
 from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 from sheets import get_submissions_ws, get_ledger_ws, get_challenges_ws, get_members_ws, get_queue_ws
 
@@ -30,7 +31,102 @@ REVIEW_CHANNEL_ID = os.environ.get("REVIEW_CHANNEL_ID", "")
 CHALLENGE_CHANNEL_ID = os.environ.get("CHALLENGE_CHANNEL_ID", "")
 
 
-def _build_review_modal(submission: dict, submission_id: str, queue_msg_ts: str, queue_ch_id: str = "") -> dict:
+def _is_image_error(e: SlackApiError) -> bool:
+    """True if Slack rejected the view because an image block couldn't be loaded
+    (Slack file deleted/inaccessible, or external image download failed)."""
+    messages = " ".join(e.response.get("response_metadata", {}).get("messages", [])).lower()
+    return "file_not_found" in messages or "downloading image failed" in messages
+
+
+def _fetch_submission_message(client: WebClient, submission: dict, logger: Logger) -> tuple[str, dict | None]:
+    """Look up the original challenge message. Returns ("found", msg), ("deleted", None),
+    or ("unknown", None) when there's no message to check or the lookup failed."""
+    message_url = (submission.get("message_url") or "").strip()
+    if "|" not in message_url:
+        return "unknown", None  # e.g. admin submissions have no original message
+    channel, ts = message_url.split("|", 1)
+    ts = _to_slack_ts(ts)
+    if not channel or not ts:
+        return "unknown", None
+    try:
+        resp = client.conversations_history(channel=channel, latest=ts, oldest=ts, inclusive=True, limit=1)
+        msgs = [m for m in resp.get("messages", []) if m.get("ts") == ts]
+        if not msgs:
+            # Might be a thread reply, which conversations.history doesn't return.
+            resp = client.conversations_replies(channel=channel, ts=ts, limit=1)
+            msgs = [m for m in resp.get("messages", []) if m.get("ts") == ts]
+    except SlackApiError as e:
+        if e.response.get("error") in ("thread_not_found", "message_not_found"):
+            return "deleted", None
+        logger.warning("Could not look up submission message %s: %s", message_url, e)
+        return "unknown", None
+    # A deleted parent with replies stays behind as a "tombstone".
+    if not msgs or msgs[0].get("subtype") == "tombstone":
+        return "deleted", None
+    return "found", msgs[0]
+
+
+def _show_next_pending(client: WebClient, view_id: str, view_hash, submissions_ws, submissions_rows: list[dict],
+                       queue_msg_ts: str, queue_ch_id: str, logger: Logger) -> None:
+    """Show the next PENDING submission in the modal. Deleted messages are normally caught by the
+    message_deleted event in app.py; this only looks up the message (slow path) when Slack rejects
+    an image. Deleted message -> mark ERROR and skip; otherwise refresh images from the live
+    message, and leave out any that still can't be loaded."""
+    skipped = False
+    while True:
+        submission = get_next_pending_submission(submissions_ws, submissions_rows)
+        if not submission:
+            client.views_update(
+                view_id=view_id,
+                hash=view_hash,
+                view={
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": "Review Submission"},
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "No more submissions in the queue."}}],
+                },
+            )
+            break
+        submission_id = (submission.get("submission_id") or "").strip()
+        try:
+            modal = _build_review_modal(submission, submission_id, queue_msg_ts, queue_ch_id)
+            client.views_update(view_id=view_id, hash=view_hash, view=modal)
+            break
+        except SlackApiError as e:
+            if not _is_image_error(e):
+                raise
+
+        # Slow path: an image couldn't be loaded, so check the original message.
+        status, msg = _fetch_submission_message(client, submission, logger)
+        if status == "deleted":
+            logger.warning("Submission %s message was deleted; marking ERROR and skipping", submission_id)
+            update_submission_status(submissions_ws, submission_id, "ERROR", "BOT (message deleted)")
+            submission["status"] = "ERROR"  # same dict as in submissions_rows, so the loop advances
+            skipped = True
+            continue
+        if msg is not None:
+            # Use the message's current files; files removed from it show up as tombstones.
+            live_urls = [f.get("url_private") or f.get("permalink", "") for f in msg.get("files") or []
+                         if f.get("mode") != "tombstone"]
+            submission = {**submission, "photo_url": "|".join(u for u in live_urls if u)}
+            try:
+                modal = _build_review_modal(submission, submission_id, queue_msg_ts, queue_ch_id)
+                client.views_update(view_id=view_id, hash=view_hash, view=modal)
+                break
+            except SlackApiError as e:
+                if not _is_image_error(e):
+                    raise
+        logger.warning("Submission %s image could not be loaded; showing without images", submission_id)
+        modal = _build_review_modal(submission, submission_id, queue_msg_ts, queue_ch_id, include_images=False)
+        client.views_update(view_id=view_id, hash=view_hash, view=modal)
+        break
+
+    if skipped:
+        # Pending count changed; refresh the queue message.
+        update_queue_message(client, get_queue_ws(), submissions_ws, REVIEW_CHANNEL_ID, submissions_rows=submissions_rows)
+
+
+def _build_review_modal(submission: dict, submission_id: str, queue_msg_ts: str, queue_ch_id: str = "",
+                        include_images: bool = True) -> dict:
     """Build modal with prefix dropdown, challenge dropdown (option_groups), Accept and Reject buttons."""
     challenges_ws = get_challenges_ws()
     # IMPORTANT: avoid repeated Google Sheets reads (quota). Load challenges once.
@@ -62,14 +158,27 @@ def _build_review_modal(submission: dict, submission_id: str, queue_msg_ts: str,
     # Show images inline; show videos/other files as links you can click to view in Slack.
     image_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp")
     other_links: list[str] = []
+    missing_images = False
     for url in photo_url.split("|"):
         url = url.strip()
         if not url or not any(url.lower().startswith(prefix) for prefix in ("http://", "https://")):
             continue
         if url.lower().endswith(image_exts):
-            blocks.append({"type": "image", "image_url": url, "alt_text": "Submission media"})
+            if include_images:
+                blocks.append({"type": "image", "image_url": url, "alt_text": "Submission media"})
+            else:
+                missing_images = True
         else:
             other_links.append(url)
+
+    if missing_images:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "⚠️ An attached image couldn't be loaded. Check the original challenge message.",
+            },
+        })
 
     if other_links:
         # We can't reliably embed videos in a modal, so just remind the reviewer
@@ -168,13 +277,9 @@ def open_review_modal_callback(ack: Ack, client: WebClient, body: dict, logger: 
             return
 
         submissions_ws = get_submissions_ws()
-        submission = get_next_pending_submission(submissions_ws)
-        if not submission:
-            client.views_update(view_id=view_id, view={"type": "modal", "title": loading_modal["title"], "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "No submissions in queue."}}]})
-            return
-        submission_id = (submission.get("submission_id") or "").strip()
-        full_modal = _build_review_modal(submission, submission_id, queue_msg_ts or "", queue_ch_id or "")
-        client.views_update(view_id=view_id, hash=resp.get("view", {}).get("hash"), view=full_modal)
+        submissions_rows = submissions_ws.get_all_records()
+        _show_next_pending(client, view_id, resp.get("view", {}).get("hash"), submissions_ws, submissions_rows,
+                           queue_msg_ts or "", queue_ch_id or "", logger)
     except Exception as e:
         logger.exception("Open review modal failed: %s", e)
 
@@ -291,27 +396,8 @@ def review_accept_callback(ack: Ack, client: WebClient, body: dict, logger: Logg
 
         # Auto-advance to next pending submission in the same modal, using the
         # same submissions list we already loaded (with status updated).
-        next_submission = get_next_pending_submission(submissions_ws, submissions_rows)
-        if not next_submission:
-            client.views_update(
-                view_id=view["id"],
-                hash=view.get("hash"),
-                view={
-                    "type": "modal",
-                    "title": {"type": "plain_text", "text": "Review Submission"},
-                    "blocks": [
-                        {
-                            "type": "section",
-                            "text": {"type": "mrkdwn", "text": "No more submissions in the queue."},
-                        }
-                    ],
-                },
-            )
-            return
-
-        next_submission_id = (next_submission.get("submission_id") or "").strip()
-        next_modal = _build_review_modal(next_submission, next_submission_id, queue_msg_ts or "", queue_ch_id or "")
-        client.views_update(view_id=view["id"], hash=view.get("hash"), view=next_modal)
+        _show_next_pending(client, view["id"], view.get("hash"), submissions_ws, submissions_rows,
+                           queue_msg_ts or "", queue_ch_id or "", logger)
     except Exception as e:
         logger.exception("Review accept failed: %s", e)
 
